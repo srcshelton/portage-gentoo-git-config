@@ -1,34 +1,54 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-repository_name="${1}"
-repository_path="${3}"
+#set -u # default /lib/gentoo/functions.sh makes use of unbound variables :(
 
-[[ ${repository_name} == "gentoo" ]] || exit 0
+declare DEFAULT_SYNC="rsync://rsync.gentoo.org/gentoo-portage"
 
-source /lib/gentoo/functions.sh
+main() {
+	local repository_name="${1:-}"
+	#local sync_uri="${2:-}"
+	local repository_path="${3:-}"
 
-# Number of jobs for egencache, default is number or processors.
-parallel_jobs="$(nproc)"
+	local -i parallel_jobs=1 portage_current_timestamp=0 portage_new_timestamp=0
 
-if [[ -f ${repository_path}/metadata/timestamp.x ]]; then
-	portage_current_timestamp=$(cut -f 1 -d " " "${repository_path}/metadata/timestamp.x" )
-else
-	portage_current_timestamp=0
-fi
+	if ! [[ -n "${repository_name:-}" && -n "${repository_path}" ]]; then
+		eerror "Invalid '${0}' parameters: '${*:-}'"
+		return 1
+	fi
 
-ebegin "Fetching metadata timestamp for ${repository_name}"
-rsync -aq rsync://rsync.gentoo.org/gentoo-portage/metadata/timestamp.x "${repository_path}"/metadata/timestamp.x
-eend $?
-portage_new_timestamp=$(cut -f 1 -d " " "${repository_path}/metadata/timestamp.x" )
+	[[ "${repository_name:-}" == "gentoo" ]] || return 0
 
-if [[ ${portage_current_timestamp} -lt ${portage_new_timestamp} ]]; then
-	ebegin "Fetching pre-generated metadata cache for ${repository_name}"
-	rsync -aq rsync://rsync.gentoo.org/gentoo-portage/metadata/md5-cache/ "${repository_path}"/metadata/md5-cache/
+	source /lib/gentoo/functions.sh || return 1
+
+	# Number of jobs for egencache, default is number of processor cores.
+	parallel_jobs="$( nproc >/dev/null 2>&1 || echo '1' )"
+
+	if [[ -f "${repository_path}"/metadata/timestamp.x ]]; then
+		portage_current_timestamp=$( cut -d' ' -f 1 "${repository_path}"/metadata/timestamp.x )
+	fi
+
+	ebegin "Fetching metadata timestamp for repo '${repository_name}'"
+	rsync -aq "${SYNC:-${DEFAULT_SYNC}}"/metadata/timestamp.x "${repository_path}"/metadata/timestamp.x
 	eend $?
-else
-	einfo "Metadata cache for ${repository_name} already recent, no need to fetch it :-)"
-fi
 
-ebegin "Updating metadata cache for ${repository_name}"
-egencache --jobs="${parallel_jobs}" --repo="${repository_name}" --update --update-use-local-desc
-eend $?
+	if [[ -f "${repository_path}"/metadata/timestamp.x ]]; then
+		portage_new_timestamp=$( cut -d' ' -f 1 "${repository_path}"/metadata/timestamp.x )
+	fi
+
+	if ! (( 0 == portage_new_timestamp || portage_current_timestamp < portage_new_timestamp )); then
+		einfo "Pre-generated metadata cache for repo '${repository_name}' already current"
+	else
+		ebegin "Fetching pre-generated metadata cache for repo '${repository_name}'"
+		rsync -aq "${SYNC:-${DEFAULT_SYNC}}"/metadata/md5-cache/ "${repository_path}"/metadata/md5-cache/
+		eend ${?}
+	fi
+
+	ebegin "Updating live metadata cache for repo '${repository_name}'"
+	# shellcheck disable=SC2086
+	egencache --jobs=${parallel_jobs} --repo="${repository_name}" --update --update-use-local-desc --preserve-comments
+	eend ${?}
+} # main
+
+main "${@:-}"
+
+exit ${?}
